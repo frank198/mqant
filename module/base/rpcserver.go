@@ -44,6 +44,10 @@ func (s *rpcserver) OnInit(module module.Module, app module.App, settings *conf.
 		//存在远程rpc的配置
 		server.NewRedisRPCServer(settings.Redis)
 	}
+	if settings.UDP != nil {
+		//存在远程rpc的配置
+		server.NewUdpRPCServer(settings.UDP)
+	}
 	s.server = server
 	err = app.RegisterLocalClient(settings.Id, server)
 	if err != nil {
@@ -53,6 +57,7 @@ func (s *rpcserver) OnInit(module module.Module, app module.App, settings *conf.
 }
 func (s *rpcserver) OnDestroy() {
 	if s.server != nil {
+		log.Info("RPCServer closeing id(%s)", s.settings.Id)
 		err := s.server.Done()
 		if err != nil {
 			log.Warning("RPCServer close fail id(%s) error(%s)", s.settings.Id, err)

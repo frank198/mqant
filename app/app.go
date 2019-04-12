@@ -14,17 +14,16 @@
 package defaultApp
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/liangdas/mqant/conf"
-	"github.com/liangdas/mqant/gate"
 	"github.com/liangdas/mqant/log"
 	"github.com/liangdas/mqant/module"
 	"github.com/liangdas/mqant/module/base"
 	"github.com/liangdas/mqant/module/modules"
 	"github.com/liangdas/mqant/rpc"
 	"github.com/liangdas/mqant/rpc/base"
-	opentracing "github.com/opentracing/opentracing-go"
 	"hash/crc32"
 	"math"
 	"os"
@@ -32,7 +31,23 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 )
+
+type resultInfo struct {
+	Trace  string
+	Error  string      //错误结果 如果为nil表示请求正确
+	Result interface{} //结果
+}
+
+type protocolMarshalImp struct {
+	data []byte
+}
+
+func (this *protocolMarshalImp) GetData() []byte {
+	return this.data
+}
 
 func NewApp(version string) module.App {
 	app := new(DefaultApp)
@@ -53,18 +68,20 @@ func NewApp(version string) module.App {
 }
 
 type DefaultApp struct {
-	module.App
-	version             string
-	serverList          map[string]module.ServerSession
-	settings            conf.Config
-	routes              map[string]func(app module.App, Type string, hash string) module.ServerSession
-	defaultRoutes       func(app module.App, Type string, hash string) module.ServerSession
+	//module.App
+	version       string
+	serverList    map[string]module.ServerSession
+	settings      conf.Config
+	processId     string
+	routes        map[string]func(app module.App, Type string, hash string) module.ServerSession
+	defaultRoutes func(app module.App, Type string, hash string) module.ServerSession
+	//将一个RPC调用路由到新的路由上
+	mapRoute            func(app module.App, route string) string
 	rpcserializes       map[string]module.RPCSerialize
-	getTracer           func() opentracing.Tracer
 	configurationLoaded func(app module.App)
 	startup             func(app module.App)
 	moduleInited        func(app module.App, module module.Module)
-	judgeGuest          func(session gate.Session) bool
+	protocolMarshal     func(Trace string, Result interface{}, Error string) (module.ProtocolMarshal, string)
 }
 
 func (app *DefaultApp) Run(debug bool, mods ...module.Module) error {
@@ -72,8 +89,9 @@ func (app *DefaultApp) Run(debug bool, mods ...module.Module) error {
 	confPath := flag.String("conf", "", "Server configuration file path")
 	ProcessID := flag.String("pid", "development", "Server ProcessID?")
 	Logdir := flag.String("log", "", "Log file directory?")
+	BIdir := flag.String("bi", "", "bi file directory?")
 	flag.Parse() //解析输入的参数
-
+	app.processId = *ProcessID
 	ApplicationDir := ""
 	if *wdPath != "" {
 		_, err := os.Open(*wdPath)
@@ -95,6 +113,7 @@ func (app *DefaultApp) Run(debug bool, mods ...module.Module) error {
 
 	defaultConfPath := fmt.Sprintf("%s/bin/conf/server.json", ApplicationDir)
 	defaultLogPath := fmt.Sprintf("%s/bin/logs", ApplicationDir)
+	defaultBIPath := fmt.Sprintf("%s/bin/bi", ApplicationDir)
 
 	if *confPath == "" {
 		*confPath = defaultConfPath
@@ -102,6 +121,10 @@ func (app *DefaultApp) Run(debug bool, mods ...module.Module) error {
 
 	if *Logdir == "" {
 		*Logdir = defaultLogPath
+	}
+
+	if *BIdir == "" {
+		*BIdir = defaultBIPath
 	}
 
 	f, err := os.Open(*confPath)
@@ -117,10 +140,20 @@ func (app *DefaultApp) Run(debug bool, mods ...module.Module) error {
 			fmt.Println(err)
 		}
 	}
+
+	_, err = os.Open(*BIdir)
+	if err != nil {
+		//文件不存在
+		err := os.Mkdir(*BIdir, os.ModePerm) //
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
 	fmt.Println("Server configuration file path :", *confPath)
 	conf.LoadConfig(f.Name()) //加载配置文件
 	app.Configure(conf.Conf)  //配置信息
-	log.InitBeego(debug, *ProcessID, *Logdir, conf.Conf.Log)
+	log.InitLog(debug, *ProcessID, *Logdir, conf.Conf.Log)
+	log.InitBI(debug, *ProcessID, *BIdir, conf.Conf.BI)
 
 	log.Info("mqant %v starting up", app.version)
 
@@ -142,17 +175,35 @@ func (app *DefaultApp) Run(debug bool, mods ...module.Module) error {
 	}
 	// close
 	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, os.Kill)
+	signal.Notify(c, os.Interrupt, os.Kill, syscall.SIGTERM)
 	sig := <-c
-	manager.Destroy()
-	app.OnDestroy()
-	log.Info("mqant closing down (signal: %v)", sig)
+
+	//如果一分钟都关不了则强制关闭
+	timeout := time.NewTimer(time.Minute)
+	wait := make(chan struct{})
+	go func() {
+		manager.Destroy()
+		app.OnDestroy()
+		wait <- struct{}{}
+	}()
+	select {
+	case <-timeout.C:
+		panic(fmt.Sprintf("mqant close timeout (signal: %v)", sig))
+	case <-wait:
+		log.Info("mqant closing down (signal: %v)", sig)
+	}
 	return nil
 }
 func (app *DefaultApp) Route(moduleType string, fn func(app module.App, Type string, hash string) module.ServerSession) error {
 	app.routes[moduleType] = fn
 	return nil
 }
+
+func (app *DefaultApp) SetMapRoute(fn func(app module.App, route string) string) error {
+	app.mapRoute = fn
+	return nil
+}
+
 func (app *DefaultApp) getRoute(moduleType string) func(app module.App, Type string, hash string) module.ServerSession {
 	fn := app.routes[moduleType]
 	if fn == nil {
@@ -202,6 +253,10 @@ func (app *DefaultApp) OnInit(settings conf.Config) error {
 				//如果远程的rpc存在则创建一个对应的客户端
 				client.NewRedisClient(moduel.Redis)
 			}
+			if moduel.UDP != nil {
+				//如果远程的rpc存在则创建一个对应的客户端
+				client.NewUdpClient(moduel.UDP)
+			}
 			session := basemodule.NewServerSession(moduel.Id, Type, client)
 			app.serverList[moduel.Id] = session
 			log.Info("RPCClient create success type(%s) id(%s)", Type, moduel.Id)
@@ -212,6 +267,7 @@ func (app *DefaultApp) OnInit(settings conf.Config) error {
 
 func (app *DefaultApp) OnDestroy() error {
 	for id, session := range app.serverList {
+		log.Info("RPCClient closeing type(%s) id(%s)", session.GetType(), id)
 		err := session.GetRpc().Done()
 		if err != nil {
 			log.Warning("RPCClient close fail type(%s) id(%s)", session.GetType(), id)
@@ -231,7 +287,7 @@ func (app *DefaultApp) RegisterLocalClient(serverId string, server mqrpc.RPCServ
 	return nil
 }
 
-func (app *DefaultApp) GetServersById(serverId string) (module.ServerSession, error) {
+func (app *DefaultApp) GetServerById(serverId string) (module.ServerSession, error) {
 	if session, ok := app.serverList[serverId]; ok {
 		return session, nil
 	} else {
@@ -249,12 +305,16 @@ func (app *DefaultApp) GetServersByType(Type string) []module.ServerSession {
 	return sessions
 }
 
-func (app *DefaultApp) GetRouteServers(filter string, hash string) (s module.ServerSession, err error) {
+func (app *DefaultApp) GetRouteServer(filter string, hash string) (s module.ServerSession, err error) {
+	if app.mapRoute != nil {
+		//进行一次路由转换
+		filter = app.mapRoute(app, filter)
+	}
 	sl := strings.Split(filter, "@")
 	if len(sl) == 2 {
 		moduleID := sl[1]
 		if moduleID != "" {
-			return app.GetServersById(moduleID)
+			return app.GetServerById(moduleID)
 		}
 	}
 	moduleType := sl[0]
@@ -269,9 +329,11 @@ func (app *DefaultApp) GetRouteServers(filter string, hash string) (s module.Ser
 func (app *DefaultApp) GetSettings() conf.Config {
 	return app.settings
 }
-
+func (app *DefaultApp) GetProcessID() string {
+	return app.processId
+}
 func (app *DefaultApp) RpcInvoke(module module.RPCModule, moduleType string, _func string, params ...interface{}) (result interface{}, err string) {
-	server, e := app.GetRouteServers(moduleType, module.GetServerId())
+	server, e := app.GetRouteServer(moduleType, module.GetServerId())
 	if e != nil {
 		err = e.Error()
 		return
@@ -280,7 +342,7 @@ func (app *DefaultApp) RpcInvoke(module module.RPCModule, moduleType string, _fu
 }
 
 func (app *DefaultApp) RpcInvokeNR(module module.RPCModule, moduleType string, _func string, params ...interface{}) (err error) {
-	server, err := app.GetRouteServers(moduleType, module.GetServerId())
+	server, err := app.GetRouteServer(moduleType, module.GetServerId())
 	if err != nil {
 		return
 	}
@@ -288,7 +350,7 @@ func (app *DefaultApp) RpcInvokeNR(module module.RPCModule, moduleType string, _
 }
 
 func (app *DefaultApp) RpcInvokeArgs(module module.RPCModule, moduleType string, _func string, ArgsType []string, args [][]byte) (result interface{}, err string) {
-	server, e := app.GetRouteServers(moduleType, module.GetServerId())
+	server, e := app.GetRouteServer(moduleType, module.GetServerId())
 	if e != nil {
 		err = e.Error()
 		return
@@ -297,29 +359,15 @@ func (app *DefaultApp) RpcInvokeArgs(module module.RPCModule, moduleType string,
 }
 
 func (app *DefaultApp) RpcInvokeNRArgs(module module.RPCModule, moduleType string, _func string, ArgsType []string, args [][]byte) (err error) {
-	server, err := app.GetRouteServers(moduleType, module.GetServerId())
+	server, err := app.GetRouteServer(moduleType, module.GetServerId())
 	if err != nil {
 		return
 	}
 	return server.CallNRArgs(_func, ArgsType, args)
 }
-func (app *DefaultApp) DefaultTracer(_func func() opentracing.Tracer) error {
-	app.getTracer = _func
-	return nil
-}
-func (app *DefaultApp) GetTracer() opentracing.Tracer {
-	if app.getTracer != nil {
-		return app.getTracer()
-	}
-	return nil
-}
 
 func (app *DefaultApp) GetModuleInited() func(app module.App, module module.Module) {
 	return app.moduleInited
-}
-
-func (app *DefaultApp) GetJudgeGuest() func(session gate.Session) bool {
-	return app.judgeGuest
 }
 
 func (app *DefaultApp) OnConfigurationLoaded(_func func(app module.App)) error {
@@ -337,7 +385,30 @@ func (app *DefaultApp) OnStartup(_func func(app module.App)) error {
 	return nil
 }
 
-func (app *DefaultApp) SetJudgeGuest(_func func(session gate.Session) bool) error {
-	app.judgeGuest = _func
+func (app *DefaultApp) SetProtocolMarshal(protocolMarshal func(Trace string, Result interface{}, Error string) (module.ProtocolMarshal, string)) error {
+	app.protocolMarshal = protocolMarshal
 	return nil
+}
+
+func (app *DefaultApp) ProtocolMarshal(Trace string, Result interface{}, Error string) (module.ProtocolMarshal, string) {
+	if app.protocolMarshal != nil {
+		return app.protocolMarshal(Trace, Result, Error)
+	}
+	r := &resultInfo{
+		Trace:  Trace,
+		Error:  Error,
+		Result: Result,
+	}
+	b, err := json.Marshal(r)
+	if err == nil {
+		return app.NewProtocolMarshal(b), ""
+	} else {
+		return nil, err.Error()
+	}
+}
+
+func (app *DefaultApp) NewProtocolMarshal(data []byte) module.ProtocolMarshal {
+	return &protocolMarshalImp{
+		data: data,
+	}
 }

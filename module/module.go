@@ -15,10 +15,12 @@ package module
 
 import (
 	"github.com/liangdas/mqant/conf"
-	"github.com/liangdas/mqant/gate"
 	"github.com/liangdas/mqant/rpc"
-	opentracing "github.com/opentracing/opentracing-go"
 )
+
+type ProtocolMarshal interface {
+	GetData() []byte
+}
 
 type ServerSession interface {
 	GetId() string
@@ -36,16 +38,17 @@ type App interface {
 	fn: func(moduleType string,serverId string,[]*ServerSession)(*ServerSession)
 	*/
 	Route(moduleType string, fn func(app App, Type string, hash string) ServerSession) error
+	SetMapRoute(fn func(app App, route string) string) error
 	Configure(settings conf.Config) error
 	OnInit(settings conf.Config) error
 	OnDestroy() error
 	RegisterLocalClient(serverId string, server mqrpc.RPCServer) error
-	GetServersById(id string) (ServerSession, error)
+	GetServerById(id string) (ServerSession, error)
 	/**
 	filter		 调用者服务类型    moduleType|moduleType@moduleID
 	Type	   	想要调用的服务类型
 	*/
-	GetRouteServers(filter string, hash string) (ServerSession, error) //获取经过筛选过的服务
+	GetRouteServer(filter string, hash string) (ServerSession, error) //获取经过筛选过的服务
 	GetServersByType(Type string) []ServerSession
 	GetSettings() conf.Config //获取配置信息
 	RpcInvoke(module RPCModule, moduleType string, _func string, params ...interface{}) (interface{}, string)
@@ -59,19 +62,19 @@ type App interface {
 
 	GetRPCSerialize() map[string]RPCSerialize
 
-	DefaultTracer(func() opentracing.Tracer) error
-
-	GetTracer() opentracing.Tracer
-
 	GetModuleInited() func(app App, module Module)
-
-	GetJudgeGuest() func(session gate.Session) bool
 
 	OnConfigurationLoaded(func(app App)) error
 	OnModuleInited(func(app App, module Module)) error
 	OnStartup(func(app App)) error
 
-	SetJudgeGuest(judgeGuest func(session gate.Session) bool) error
+	SetProtocolMarshal(protocolMarshal func(Trace string, Result interface{}, Error string) (ProtocolMarshal, string)) error
+	/**
+	与客户端通信的协议包接口
+	*/
+	ProtocolMarshal(Trace string, Result interface{}, Error string) (ProtocolMarshal, string)
+	NewProtocolMarshal(data []byte) ProtocolMarshal
+	GetProcessID() string
 }
 
 type Module interface {
@@ -96,7 +99,7 @@ type RPCModule interface {
 	filter		 调用者服务类型    moduleType|moduleType@moduleID
 	Type	   	想要调用的服务类型
 	*/
-	GetRouteServers(filter string, hash string) (ServerSession, error)
+	GetRouteServer(filter string, hash string) (ServerSession, error)
 	GetStatistical() (statistical string, err error)
 	GetExecuting() int64
 }

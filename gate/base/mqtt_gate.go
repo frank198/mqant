@@ -14,22 +14,23 @@
 package basegate
 
 import (
-	"bufio"
 	"fmt"
+	"reflect"
+	"time"
+
 	"github.com/liangdas/mqant/conf"
 	"github.com/liangdas/mqant/gate"
 	"github.com/liangdas/mqant/log"
 	"github.com/liangdas/mqant/module"
 	"github.com/liangdas/mqant/module/base"
 	"github.com/liangdas/mqant/network"
-	"reflect"
-	"time"
 )
 
-var RPC_PARAM_SESSION_TYPE = "SESSION"
+var RPC_PARAM_SESSION_TYPE = gate.RPC_PARAM_SESSION_TYPE
+var RPC_PARAM_ProtocolMarshal_TYPE = gate.RPC_PARAM_ProtocolMarshal_TYPE
 
 type Gate struct {
-	module.RPCSerialize
+	//module.RPCSerialize
 	basemodule.BaseModule
 	MaxConnNum          int
 	MaxMsgLen           uint32
@@ -52,6 +53,28 @@ type Gate struct {
 	sessionLearner gate.SessionLearner
 	storage        gate.StorageHandler
 	tracing        gate.TracingHandler
+	router         gate.RouteHandler
+	judgeGuest     func(session gate.Session) bool
+
+	createAgent func() gate.Agent
+}
+
+func (this *Gate) defaultCreateAgentd() gate.Agent {
+	a := NewMqttAgent(this.GetModule())
+	return a
+}
+
+func (this *Gate) SetJudgeGuest(judgeGuest func(session gate.Session) bool) error {
+	this.judgeGuest = judgeGuest
+	return nil
+}
+
+/**
+设置Session信息持久化接口
+*/
+func (this *Gate) SetRouteHandler(router gate.RouteHandler) error {
+	this.router = router
+	return nil
 }
 
 /**
@@ -78,9 +101,49 @@ func (this *Gate) SetTracingHandler(tracing gate.TracingHandler) error {
 	return nil
 }
 
+/**
+设置创建客户端Agent的函数
+*/
+func (this *Gate) SetCreateAgent(cfunc func() gate.Agent) error {
+	this.createAgent = cfunc
+	return nil
+}
+
 func (this *Gate) GetStorageHandler() (storage gate.StorageHandler) {
 	return this.storage
 }
+func (this *Gate) GetMinStorageHeartbeat() int64 {
+	return this.MinStorageHeartbeat
+}
+func (this *Gate) GetGateHandler() gate.GateHandler {
+	return this.handler
+}
+func (this *Gate) GetAgentLearner() gate.AgentLearner {
+	return this.agentLearner
+}
+func (this *Gate) GetSessionLearner() gate.SessionLearner {
+	return this.sessionLearner
+}
+func (this *Gate) GetTracingHandler() gate.TracingHandler {
+	return this.tracing
+}
+func (this *Gate) GetRouteHandler() gate.RouteHandler {
+	return this.router
+}
+func (this *Gate) GetJudgeGuest() func(session gate.Session) bool {
+	return this.judgeGuest
+}
+func (this *Gate) GetModule() module.RPCModule {
+	return this.GetSubclass()
+}
+
+func (this *Gate) NewSession(data []byte) (gate.Session, error) {
+	return NewSession(this.App, data)
+}
+func (this *Gate) NewSessionByMap(data map[string]interface{}) (gate.Session, error) {
+	return NewSessionByMap(this.App, data)
+}
+
 func (this *Gate) OnConfChanged(settings *conf.ModuleSettings) {
 
 }
@@ -96,6 +159,9 @@ func (this *Gate) Serialize(param interface{}) (ptype string, p []byte, err erro
 			return RPC_PARAM_SESSION_TYPE, nil, err
 		}
 		return RPC_PARAM_SESSION_TYPE, bytes, nil
+	case module.ProtocolMarshal:
+		bytes := v2.GetData()
+		return RPC_PARAM_ProtocolMarshal_TYPE, bytes, nil
 	default:
 		return "", nil, fmt.Errorf("args [%s] Types not allowed", reflect.TypeOf(param))
 	}
@@ -109,6 +175,8 @@ func (this *Gate) Deserialize(ptype string, b []byte) (param interface{}, err er
 			return nil, errs
 		}
 		return mps, nil
+	case RPC_PARAM_ProtocolMarshal_TYPE:
+		return this.App.NewProtocolMarshal(b), nil
 	default:
 		return nil, fmt.Errorf("args [%s] Types not allowed", ptype)
 	}
@@ -122,7 +190,7 @@ func (this *Gate) OnAppConfigurationLoaded(app module.App) {
 	this.BaseModule.OnAppConfigurationLoaded(app) //这是必须的
 	err := app.AddRPCSerialize("gate", this)
 	if err != nil {
-		log.Warning("Adding session structures failed to serialize interfaces", err.Error())
+		log.Warning("Adding session structures failed to serialize interfaces %s", err.Error())
 	}
 }
 func (this *Gate) OnInit(subclass module.RPCModule, app module.App, settings *conf.ModuleSettings) {
@@ -130,9 +198,13 @@ func (this *Gate) OnInit(subclass module.RPCModule, app module.App, settings *co
 
 	this.MaxConnNum = int(settings.Settings["MaxConnNum"].(float64))
 	this.MaxMsgLen = uint32(settings.Settings["MaxMsgLen"].(float64))
-	this.WSAddr = settings.Settings["WSAddr"].(string)
+	if WSAddr, ok := settings.Settings["WSAddr"]; ok {
+		this.WSAddr = WSAddr.(string)
+	}
 	this.HTTPTimeout = time.Second * time.Duration(settings.Settings["HTTPTimeout"].(float64))
-	this.TCPAddr = settings.Settings["TCPAddr"].(string)
+	if TCPAddr, ok := settings.Settings["TCPAddr"]; ok {
+		this.TCPAddr = TCPAddr.(string)
+	}
 	if Tls, ok := settings.Settings["Tls"]; ok {
 		this.Tls = Tls.(bool)
 	} else {
@@ -159,7 +231,6 @@ func (this *Gate) OnInit(subclass module.RPCModule, app module.App, settings *co
 
 	this.agentLearner = handler
 	this.handler = handler
-
 	this.GetServer().RegisterGO("Update", this.handler.Update)
 	this.GetServer().RegisterGO("Bind", this.handler.Bind)
 	this.GetServer().RegisterGO("UnBind", this.handler.UnBind)
@@ -167,6 +238,8 @@ func (this *Gate) OnInit(subclass module.RPCModule, app module.App, settings *co
 	this.GetServer().RegisterGO("Set", this.handler.Set)
 	this.GetServer().RegisterGO("Remove", this.handler.Remove)
 	this.GetServer().RegisterGO("Send", this.handler.Send)
+	this.GetServer().RegisterGO("SendBatch", this.handler.SendBatch)
+	this.GetServer().RegisterGO("BroadCast", this.handler.BroadCast)
 	this.GetServer().RegisterGO("IsConnect", this.handler.IsConnect)
 	this.GetServer().RegisterGO("Close", this.handler.Close)
 }
@@ -183,16 +256,12 @@ func (this *Gate) Run(closeSig chan bool) {
 		wsServer.CertFile = this.CertFile
 		wsServer.KeyFile = this.KeyFile
 		wsServer.NewAgent = func(conn *network.WSConn) network.Agent {
-			a := &agent{
-				conn:     conn,
-				gate:     this,
-				r:        bufio.NewReader(conn),
-				w:        bufio.NewWriter(conn),
-				isclose:  false,
-				rev_num:  0,
-				send_num: 0,
+			if this.createAgent == nil {
+				this.createAgent = this.defaultCreateAgentd
 			}
-			return a
+			agent := this.createAgent()
+			agent.OnInit(this, conn)
+			return agent
 		}
 	}
 
@@ -205,16 +274,12 @@ func (this *Gate) Run(closeSig chan bool) {
 		tcpServer.CertFile = this.CertFile
 		tcpServer.KeyFile = this.KeyFile
 		tcpServer.NewAgent = func(conn *network.TCPConn) network.Agent {
-			a := &agent{
-				conn:     conn,
-				gate:     this,
-				r:        bufio.NewReader(conn),
-				w:        bufio.NewWriter(conn),
-				isclose:  false,
-				rev_num:  0,
-				send_num: 0,
+			if this.createAgent == nil {
+				this.createAgent = this.defaultCreateAgentd
 			}
-			return a
+			agent := this.createAgent()
+			agent.OnInit(this, conn)
+			return agent
 		}
 	}
 

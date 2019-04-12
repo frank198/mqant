@@ -11,20 +11,29 @@ mqant是一款基于Golang语言的简洁,高效,高性能的分布式游戏服�
 2. 支持分布式跟踪系统接口[传送门](http://bigbully.github.io/Dapper-translation/)
 3. 基于golang协程,开发过程全程做到无callback回调,代码可读性更高
 4. RPC支持本地和远程自动切换
-5. 远程RPC使用redis,rabbitmq,未来可以添加更多种类的通信协议
+5. 远程RPC使用redis,rabbitmq,udp作为通道,未来可以添加更多种类的通信协议
 6. 网关采用MQTT协议,无需再开发客户端底层库,直接套用已有的MQTT客户端代码库,可以支持IOS,Android,websocket,PC等多平台通信
-
+7. 默认支持mqtt协议,同时网关也支持开发者自定义的粘包协议
 
 # 社区
 QQ交流群 :463735103
 
 技术交流社区:[www.mqant.com](http://www.mqant.com)
 
-# 三方模块
+# 模块
 
 > 将不断加入更多的模块
 
-[三方组件库](https://github.com/liangdas/mqant-modules)
+[mqant组件库](https://github.com/liangdas/mqant-modules)
+
+        短信验证码
+        房间模块
+
+[压力测试工具:armyant](https://github.com/liangdas/armyant)
+
+# 社区贡献的库
+ [mqant-docker](https://github.com/bjfumac/mqant-docker)
+ [MQTT-Laya](https://github.com/bjfumac/MQTT-Laya)
 
 # 依赖项目
 
@@ -33,9 +42,8 @@ QQ交流群 :463735103
 	go get github.com/streadway/amqp
 	go get github.com/golang/protobuf
 	go get github.com/golang/net/context
-	go get github.com/opentracing/basictracer-go
-	go get github.com/opentracing/opentracing-go
-	go get github.com/garyburd/redigo
+	go get github.com/gomodule/redigo
+	go get github.com/Jeffail/tunny
 
 #	文档
 
@@ -63,7 +71,7 @@ QQ交流群 :463735103
  [多人对战吃小球游戏（绿色小球是在线玩家,点击屏幕任意位置移动小球,可以同时开两个浏览器测试,支持移动端）](http://www.mqant.com/mqant/hitball/)【[源码下载](https://github.com/liangdas/mqantserver)】
 
  
- 
+
  
 
 #	框架架构
@@ -97,10 +105,25 @@ bug请直接通过issue提交
 
 1. [xlionet](https://github.com/xlionet)
 2. [lulucas](https://github.com/lulucas/mqant-UnityExample)
+3. [c2matrix](https://github.com/c2matrix)
+4. [bjfumac【mqant-docker】[MQTT-Laya]](https://github.com/bjfumac)
+5. [jarekzha 【jarekzha-master】](https://github.com/jarekzha)
 
 
+## 打赏作者
+
+![alt mqant作者打赏码](https://github.com/liangdas/mqant/wiki/images/donation.png)
 
 ## 版本日志
+
+### [v1.7.0新特性](https://github.com/liangdas/mqant/wiki/v1.7.0)
+
+### [v1.6.6新特性](https://github.com/liangdas/mqant/wiki/v1.6.6)
+
+### [v1.6.5新特性](https://github.com/liangdas/mqant/wiki/v1.6.5)
+
+### [v1.6.4新特性](https://github.com/liangdas/mqant/wiki/v1.6.4)
+
 ### [v1.6.3新特性](https://github.com/liangdas/mqant/wiki/v1.6.3)
 
 ### [v1.6.2新特性](https://github.com/liangdas/mqant/wiki/v1.6.2)

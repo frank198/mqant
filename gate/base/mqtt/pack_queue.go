@@ -20,7 +20,9 @@ import (
 	"github.com/liangdas/mqant/conf"
 	"github.com/liangdas/mqant/log"
 	"github.com/liangdas/mqant/network"
+	"runtime"
 	"time"
+	"sync"
 )
 
 // Tcp write queue
@@ -29,10 +31,9 @@ type PackQueue struct {
 	// The last error in the tcp connection
 	writeError error
 	// Notice read the error
-	errorChan chan error
-	noticeFin chan byte
-	writeChan chan *pakcAdnType
-	readChan  chan<- *packAndErr
+	fch		chan struct{}
+	writelock   	sync.Mutex
+	recover 	func (pAndErr *packAndErr) (err error)
 	// Pack connection
 	r *bufio.Reader
 	w *bufio.Writer
@@ -40,6 +41,8 @@ type PackQueue struct {
 	conn network.Conn
 
 	alive int
+
+	status	int
 }
 
 type packAndErr struct {
@@ -52,15 +55,21 @@ const (
 	NO_DELAY = iota
 	DELAY
 	FLUSH
+
+	DISCONNECTED = iota
+	CONNECTED
+	CLOSED
+	RECONNECTING
+	CONNECTING
 )
 
-type pakcAdnType struct {
+type packAndType struct {
 	pack *Pack
 	typ  byte
 }
 
 // Init a pack queue
-func NewPackQueue(conf conf.Mqtt, r *bufio.Reader, w *bufio.Writer, conn network.Conn, readChan chan<- *packAndErr, alive int) *PackQueue {
+func NewPackQueue(conf conf.Mqtt, r *bufio.Reader, w *bufio.Writer, conn network.Conn, recover 	func (pAndErr *packAndErr) (err error), alive int) *PackQueue {
 	if alive < 1 {
 		alive = conf.ReadTimeout
 	}
@@ -71,70 +80,62 @@ func NewPackQueue(conf conf.Mqtt, r *bufio.Reader, w *bufio.Writer, conn network
 		r:         r,
 		w:         w,
 		conn:      conn,
-		noticeFin: make(chan byte, 2),
-		writeChan: make(chan *pakcAdnType, conf.WirteLoopChanNum),
-		readChan:  readChan,
-		errorChan: make(chan error, 1),
+		recover:  recover,
+		fch:		make(chan struct{},1024),
+		status:		CONNECTED,
 	}
 }
 
-// Start a pack write queue
-// It should run in a new grountine
-func (queue *PackQueue) writeLoop() {
-	// defer recover()
-	var err error
-loop:
-	for {
-		select {
-		case pt, ok := <-queue.writeChan:
-			if !ok {
-				break loop
-			}
-			if pt == nil {
-				break loop
-			}
-			if queue.conf.WriteTimeout > 0 {
-				queue.conn.SetWriteDeadline(time.Now().Add(time.Second * time.Duration(queue.conf.WriteTimeout)))
-			}
-			switch pt.typ {
-			case NO_DELAY:
-				err = WritePack(pt.pack, queue.w)
-			case DELAY:
-				err = DelayWritePack(pt.pack, queue.w)
-			case FLUSH:
-				err = queue.w.Flush()
-			}
-
-			if err != nil {
-				// Tell listener the error
-				// Notice the read
-				queue.writeError = err
-				queue.errorChan <- err
-				queue.noticeFin <- 0
-				break loop
+func (queue *PackQueue) isConnected() bool{
+	return queue.status == CONNECTED
+}
+// Get a read pack queue
+// Only call once
+func (queue *PackQueue) Flusher () {
+	for queue.isConnected(){
+		if _, ok := <-queue.fch; !ok {
+			break
+		}
+		queue.writelock.Lock()
+		if !queue.isConnected(){
+			queue.writelock.Unlock()
+			break
+		}
+		if queue.w.Buffered() > 0 {
+			if err := queue.w.Flush(); err != nil {
+				queue.writelock.Unlock()
+				break
 			}
 		}
+		queue.writelock.Unlock()
 	}
+	log.Info("flusher_loop Groutine will esc.")
 }
 
 // Write a pack , and get the last error
-func (queue *PackQueue) WritePack(pack *Pack) error {
+func (queue *PackQueue) WritePack(pack *Pack) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			buf := make([]byte, 1024)
+			l := runtime.Stack(buf, false)
+			errstr := string(buf[:l])
+			err=fmt.Errorf("WritePack error %v",errstr)
+			queue.Close(err)
+		}
+	}()
 	if queue.writeError != nil {
 		return queue.writeError
 	}
-	queue.writeChan <- &pakcAdnType{pack: pack}
-	return nil
-}
-
-func (queue *PackQueue) WriteDelayPack(pack *Pack) error {
-	if queue.writeError != nil {
-		return queue.writeError
+	queue.writelock.Lock()
+	err=DelayWritePack(pack,queue.w)
+	queue.fch<- struct{}{}
+	queue.writelock.Unlock()
+	if err != nil {
+		// Tell listener the error
+		// Notice the read
+		queue.Close(err)
 	}
-	queue.writeChan <- &pakcAdnType{
-		pack: pack,
-		typ:  DELAY,
-	}
-	return nil
+	return err
 }
 
 func (queue *PackQueue) SetAlive(alive int) error {
@@ -146,81 +147,40 @@ func (queue *PackQueue) SetAlive(alive int) error {
 	return nil
 }
 
-func (queue *PackQueue) Flush() error {
-	if queue.writeError != nil {
-		return queue.writeError
-	}
-	queue.writeChan <- &pakcAdnType{typ: FLUSH}
-	return nil
-}
-
-// Read a pack and retuen the write queue error
-//func (queue *PackQueue) ReadPack() (pack *mqtt.Pack, err error) {
-//	ch := make(chan *packAndErr, 1)
-//	go func() {
-//		p := new(packAndErr)
-//		if Conf.ReadTimeout > 0 {
-//			queue.conn.SetReadDeadline(time.Now().Add(time.Second * time.Duration(Conf.ReadTimeout)))
-//		}
-//		p.pack, p.err = mqtt.ReadPack(queue.r)
-//		ch <- p
-//	}()
-//	select {
-//	case err = <-queue.errorChan:
-//		// Hava an error
-//		// pass
-//	case pAndErr := <-ch:
-//		pack = pAndErr.pack
-//		err = pAndErr.err
-//	}
-//	return
-//}
 
 // Get a read pack queue
 // Only call once
 func (queue *PackQueue) ReadPackInLoop() {
-
-	go func() {
-		// defer recover()
-		is_continue := true
-		p := new(packAndErr)
+	// defer recover()
+	p := new(packAndErr)
 	loop:
-		for {
+		for queue.isConnected(){
 			if queue.alive > 0 {
-				queue.conn.SetReadDeadline(time.Now().Add(time.Second * time.Duration(queue.alive)))
-			}
-			if is_continue {
-				p.pack, p.err = ReadPack(queue.r)
-				if p.err != nil {
-					is_continue = false
-				}
-				select {
-				case queue.readChan <- p:
-					// Without anything to do
-				case <-queue.noticeFin:
-					//queue.Close()
-					log.Info("Queue FIN")
-					break loop
-				}
+				queue.conn.SetReadDeadline(time.Now().Add(time.Second * time.Duration(int(float64(queue.alive)*1.5))))
 			} else {
-				<-queue.noticeFin
-				//
-				log.Info("Queue not continue")
+				queue.conn.SetReadDeadline(time.Now().Add(time.Second * 90))
+			}
+			p.pack, p.err = ReadPack(queue.r)
+			if p.err != nil {
+				queue.Close(p.err)
 				break loop
 			}
-
+			err:=queue.recover(p)
+			if err != nil {
+				queue.Close(err)
+				break loop
+			}
 			p = new(packAndErr)
 		}
-		queue.Close()
-	}()
+
+	log.Info("read_loop Groutine will esc.")
 }
 
 // Close the all of queue's channels
-func (queue *PackQueue) Close() error {
-	close(queue.writeChan)
-	close(queue.readChan)
-	close(queue.errorChan)
-	close(queue.noticeFin)
+func (queue *PackQueue) Close(err error) error {
+	queue.writeError = err
+	close(queue.fch)
+	queue.status=CLOSED
 	return nil
 }
 
@@ -254,3 +214,4 @@ func (b *buffer) readByte() (c byte, err error) {
 	b.index++
 	return
 }
+

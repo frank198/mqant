@@ -19,13 +19,13 @@ import (
 	"github.com/liangdas/mqant/gate"
 	"github.com/liangdas/mqant/log"
 	"github.com/liangdas/mqant/module"
-	opentracing "github.com/opentracing/opentracing-go"
+	"github.com/liangdas/mqant/utils"
+	"strconv"
 )
 
 type sessionagent struct {
 	app        module.App
-	session    *session
-	span       opentracing.Span
+	session    *SessionImp
 	judgeGuest func(session gate.Session) bool
 }
 
@@ -33,26 +33,24 @@ func NewSession(app module.App, data []byte) (gate.Session, error) {
 	agent := &sessionagent{
 		app: app,
 	}
-	se := &session{}
+	se := &SessionImp{}
 	err := proto.Unmarshal(data, se)
 	if err != nil {
 		return nil, err
 	} // 测试结果
 	agent.session = se
-	agent.judgeGuest = app.GetJudgeGuest()
 	return agent, nil
 }
 
 func NewSessionByMap(app module.App, data map[string]interface{}) (gate.Session, error) {
 	agent := &sessionagent{
 		app:     app,
-		session: new(session),
+		session: new(SessionImp),
 	}
 	err := agent.updateMap(data)
 	if err != nil {
 		return nil, err
 	}
-	agent.judgeGuest = app.GetJudgeGuest()
 	return agent, nil
 }
 
@@ -64,16 +62,24 @@ func (this *sessionagent) GetNetwork() string {
 	return this.session.GetNetwork()
 }
 
-func (this *sessionagent) GetUserid() string {
-	return this.session.GetUserid()
+func (this *sessionagent) GetUserId() string {
+	return this.session.GetUserId()
 }
 
-func (this *sessionagent) GetSessionid() string {
-	return this.session.GetSessionid()
+func (this *sessionagent) GetUserIdInt64() int64 {
+	uid64, err := strconv.ParseInt(this.session.GetUserId(), 10, 64)
+	if err != nil {
+		return -1
+	}
+	return uid64
 }
 
-func (this *sessionagent) GetServerid() string {
-	return this.session.GetServerid()
+func (this *sessionagent) GetSessionId() string {
+	return this.session.GetSessionId()
+}
+
+func (this *sessionagent) GetServerId() string {
+	return this.session.GetServerId()
 }
 
 func (this *sessionagent) GetSettings() map[string]string {
@@ -86,14 +92,14 @@ func (this *sessionagent) SetIP(ip string) {
 func (this *sessionagent) SetNetwork(network string) {
 	this.session.Network = network
 }
-func (this *sessionagent) SetUserid(userid string) {
-	this.session.Userid = userid
+func (this *sessionagent) SetUserId(userid string) {
+	this.session.UserId = userid
 }
-func (this *sessionagent) SetSessionid(sessionid string) {
-	this.session.Sessionid = sessionid
+func (this *sessionagent) SetSessionId(sessionid string) {
+	this.session.SessionId = sessionid
 }
-func (this *sessionagent) SetServerid(serverid string) {
-	this.session.Serverid = serverid
+func (this *sessionagent) SetServerId(serverid string) {
+	this.session.ServerId = serverid
 }
 func (this *sessionagent) SetSettings(settings map[string]string) {
 	this.session.Settings = settings
@@ -102,7 +108,7 @@ func (this *sessionagent) SetSettings(settings map[string]string) {
 func (this *sessionagent) updateMap(s map[string]interface{}) error {
 	Userid := s["Userid"]
 	if Userid != nil {
-		this.session.Userid = Userid.(string)
+		this.session.UserId = Userid.(string)
 	}
 	IP := s["IP"]
 	if IP != nil {
@@ -114,11 +120,11 @@ func (this *sessionagent) updateMap(s map[string]interface{}) error {
 	}
 	Sessionid := s["Sessionid"]
 	if Sessionid != nil {
-		this.session.Sessionid = Sessionid.(string)
+		this.session.SessionId = Sessionid.(string)
 	}
 	Serverid := s["Serverid"]
 	if Serverid != nil {
-		this.session.Serverid = Serverid.(string)
+		this.session.ServerId = Serverid.(string)
 	}
 	Settings := s["Settings"]
 	if Settings != nil {
@@ -128,16 +134,16 @@ func (this *sessionagent) updateMap(s map[string]interface{}) error {
 }
 
 func (this *sessionagent) update(s gate.Session) error {
-	Userid := s.GetUserid()
-	this.session.Userid = Userid
+	Userid := s.GetUserId()
+	this.session.UserId = Userid
 	IP := s.GetIP()
 	this.session.IP = IP
 	Network := s.GetNetwork()
 	this.session.Network = Network
-	Sessionid := s.GetSessionid()
-	this.session.Sessionid = Sessionid
-	Serverid := s.GetServerid()
-	this.session.Serverid = Serverid
+	Sessionid := s.GetSessionId()
+	this.session.SessionId = Sessionid
+	Serverid := s.GetServerId()
+	this.session.ServerId = Serverid
 	Settings := s.GetSettings()
 	this.session.Settings = Settings
 	return nil
@@ -156,12 +162,12 @@ func (this *sessionagent) Update() (err string) {
 		err = fmt.Sprintf("Module.App is nil")
 		return
 	}
-	server, e := this.app.GetServersById(this.session.Serverid)
+	server, e := this.app.GetServerById(this.session.ServerId)
 	if e != nil {
-		err = fmt.Sprintf("Service not found id(%s)", this.session.Serverid)
+		err = fmt.Sprintf("Service not found id(%s)", this.session.ServerId)
 		return
 	}
-	result, err := server.Call("Update", this.session.Sessionid)
+	result, err := server.Call("Update", log.CreateTrace(this.TraceId(), this.SpanId()), this.session.SessionId)
 	if err == "" {
 		if result != nil {
 			//绑定成功,重新更新当前Session
@@ -176,12 +182,12 @@ func (this *sessionagent) Bind(Userid string) (err string) {
 		err = fmt.Sprintf("Module.App is nil")
 		return
 	}
-	server, e := this.app.GetServersById(this.session.Serverid)
+	server, e := this.app.GetServerById(this.session.ServerId)
 	if e != nil {
-		err = fmt.Sprintf("Service not found id(%s)", this.session.Serverid)
+		err = fmt.Sprintf("Service not found id(%s)", this.session.ServerId)
 		return
 	}
-	result, err := server.Call("Bind", this.session.Sessionid, Userid)
+	result, err := server.Call("Bind", log.CreateTrace(this.TraceId(), this.SpanId()), this.session.SessionId, Userid)
 	if err == "" {
 		if result != nil {
 			//绑定成功,重新更新当前Session
@@ -196,12 +202,12 @@ func (this *sessionagent) UnBind() (err string) {
 		err = fmt.Sprintf("Module.App is nil")
 		return
 	}
-	server, e := this.app.GetServersById(this.session.Serverid)
+	server, e := this.app.GetServerById(this.session.ServerId)
 	if e != nil {
-		err = fmt.Sprintf("Service not found id(%s)", this.session.Serverid)
+		err = fmt.Sprintf("Service not found id(%s)", this.session.ServerId)
 		return
 	}
-	result, err := server.Call("UnBind", this.session.Sessionid)
+	result, err := server.Call("UnBind", log.CreateTrace(this.TraceId(), this.SpanId()), this.session.SessionId)
 	if err == "" {
 		if result != nil {
 			//绑定成功,重新更新当前Session
@@ -216,12 +222,12 @@ func (this *sessionagent) Push() (err string) {
 		err = fmt.Sprintf("Module.App is nil")
 		return
 	}
-	server, e := this.app.GetServersById(this.session.Serverid)
+	server, e := this.app.GetServerById(this.session.ServerId)
 	if e != nil {
-		err = fmt.Sprintf("Service not found id(%s)", this.session.Serverid)
+		err = fmt.Sprintf("Service not found id(%s)", this.session.ServerId)
 		return
 	}
-	result, err := server.Call("Push", this.session.Sessionid, this.session.Settings)
+	result, err := server.Call("Push", log.CreateTrace(this.TraceId(), this.SpanId()), this.session.SessionId, this.session.Settings)
 	if err == "" {
 		if result != nil {
 			//绑定成功,重新更新当前Session
@@ -240,21 +246,19 @@ func (this *sessionagent) Set(key string, value string) (err string) {
 		this.session.Settings = map[string]string{}
 	}
 	this.session.Settings[key] = value
-	//server,e:=session.app.GetServersById(session.Serverid)
-	//if e!=nil{
-	//	err=fmt.Sprintf("Service not found id(%s)",session.Serverid)
-	//	return
-	//}
-	//result,err:=server.Call("Set",session.Sessionid,key,value)
-	//if err==""{
-	//	if result!=nil{
-	//		//绑定成功,重新更新当前Session
-	//		session.update(result.(map[string]interface {}))
-	//	}
-	//}
 	return
 }
-
+func (this *sessionagent) SetPush(key string, value string) (err string) {
+	if this.app == nil {
+		err = fmt.Sprintf("Module.App is nil")
+		return
+	}
+	if this.session.Settings == nil {
+		this.session.Settings = map[string]string{}
+	}
+	this.session.Settings[key] = value
+	return this.Push()
+}
 func (this *sessionagent) Get(key string) (result string) {
 	if this.session.Settings == nil {
 		return
@@ -278,22 +282,38 @@ func (this *sessionagent) Send(topic string, body []byte) string {
 	if this.app == nil {
 		return fmt.Sprintf("Module.App is nil")
 	}
-	server, e := this.app.GetServersById(this.session.Serverid)
+	server, e := this.app.GetServerById(this.session.ServerId)
 	if e != nil {
-		return fmt.Sprintf("Service not found id(%s)", this.session.Serverid)
+		return fmt.Sprintf("Service not found id(%s)", this.session.ServerId)
 	}
-	_, err := server.Call("Send", this.session.Sessionid, topic, body)
+	_, err := server.Call("Send", log.CreateTrace(this.TraceId(), this.SpanId()), this.session.SessionId, topic, body)
 	return err
 }
+
+func (this *sessionagent) SendBatch(Sessionids string, topic string, body []byte) (int64, string) {
+	if this.app == nil {
+		return 0, fmt.Sprintf("Module.App is nil")
+	}
+	server, e := this.app.GetServerById(this.session.ServerId)
+	if e != nil {
+		return 0, fmt.Sprintf("Service not found id(%s)", this.session.ServerId)
+	}
+	count, err := server.Call("SendBatch", log.CreateTrace(this.TraceId(), this.SpanId()), Sessionids, topic, body)
+	if err != "" {
+		return 0, err
+	}
+	return count.(int64), err
+}
+
 func (this *sessionagent) IsConnect(userId string) (bool, string) {
 	if this.app == nil {
 		return false, fmt.Sprintf("Module.App is nil")
 	}
-	server, e := this.app.GetServersById(this.session.Serverid)
+	server, e := this.app.GetServerById(this.session.ServerId)
 	if e != nil {
-		return false, fmt.Sprintf("Service not found id(%s)", this.session.Serverid)
+		return false, fmt.Sprintf("Service not found id(%s)", this.session.ServerId)
 	}
-	result, err := server.Call("IsConnect", this.session.Sessionid, userId)
+	result, err := server.Call("IsConnect", log.CreateTrace(this.TraceId(), this.SpanId()), this.session.SessionId, userId)
 	return result.(bool), err
 }
 
@@ -301,11 +321,11 @@ func (this *sessionagent) SendNR(topic string, body []byte) string {
 	if this.app == nil {
 		return fmt.Sprintf("Module.App is nil")
 	}
-	server, e := this.app.GetServersById(this.session.Serverid)
+	server, e := this.app.GetServerById(this.session.ServerId)
 	if e != nil {
-		return fmt.Sprintf("Service not found id(%s)", this.session.Serverid)
+		return fmt.Sprintf("Service not found id(%s)", this.session.ServerId)
 	}
-	e = server.CallNR("Send", this.session.Sessionid, topic, body)
+	e = server.CallNR("Send", log.CreateTrace(this.TraceId(), this.SpanId()), this.session.SessionId, topic, body)
 	if e != nil {
 		return e.Error()
 	}
@@ -324,12 +344,12 @@ func (this *sessionagent) Close() (err string) {
 		err = fmt.Sprintf("Module.App is nil")
 		return
 	}
-	server, e := this.app.GetServersById(this.session.Serverid)
+	server, e := this.app.GetServerById(this.session.ServerId)
 	if e != nil {
-		err = fmt.Sprintf("Service not found id(%s)", this.session.Serverid)
+		err = fmt.Sprintf("Service not found id(%s)", this.session.ServerId)
 		return
 	}
-	_, err = server.Call("Close", this.session.Sessionid)
+	_, err = server.Call("Close", log.CreateTrace(this.TraceId(), this.SpanId()), this.session.SessionId)
 	return
 }
 
@@ -338,101 +358,51 @@ func (this *sessionagent) Close() (err string) {
 */
 func (this *sessionagent) Clone() gate.Session {
 	agent := &sessionagent{
-		app:  this.app,
-		span: this.Span(),
+		app: this.app,
 	}
-	se := &session{
+	se := &SessionImp{
 		IP:        this.session.IP,
 		Network:   this.session.Network,
-		Userid:    this.session.Userid,
-		Sessionid: this.session.Sessionid,
-		Serverid:  this.session.Serverid,
+		UserId:    this.session.UserId,
+		SessionId: this.session.SessionId,
+		ServerId:  this.session.ServerId,
+		TraceId:   this.session.TraceId,
+		SpanId:    utils.GenerateID().String(),
 		Settings:  this.session.Settings,
 	}
-	//这个要换成本次RPC调用的新Span
-	se.Carrier = this.inject()
-
 	agent.session = se
 	return agent
 }
 
-func (this *sessionagent) inject() map[string]string {
-	if this.app.GetTracer() == nil {
-		return nil
-	}
-	if this.Span() == nil {
-		return nil
-	}
-	carrier := &opentracing.TextMapCarrier{}
-	err := this.app.GetTracer().Inject(
-		this.Span().Context(),
-		opentracing.TextMap,
-		carrier)
-	if err != nil {
-		log.Warning("session.session.Carrier Inject Fail", err.Error())
-		return nil
-	} else {
-		m := map[string]string{}
-		carrier.ForeachKey(func(key, val string) error {
-			m[key] = val
-			return nil
-		})
-		return m
-	}
-}
-func (this *sessionagent) extract(gCarrier map[string]string) (opentracing.SpanContext, error) {
-	carrier := &opentracing.TextMapCarrier{}
-	for v, k := range gCarrier {
-		carrier.Set(v, k)
-	}
-	return this.app.GetTracer().Extract(opentracing.TextMap, carrier)
-}
-func (this *sessionagent) LoadSpan(operationName string) opentracing.Span {
-	if this.app.GetTracer() == nil {
-		return nil
-	}
-	if this.span == nil {
-		if this.session.Carrier != nil {
-			//从已有记录恢复
-			clientContext, err := this.extract(this.session.Carrier)
-			if err == nil {
-				this.span = this.app.GetTracer().StartSpan(
-					operationName, opentracing.ChildOf(clientContext))
-			} else {
-				log.Warning("session.session.Carrier Extract Fail", err.Error())
-			}
-		}
-	}
-	return this.span
-}
-func (this *sessionagent) CreateRootSpan(operationName string) opentracing.Span {
-	if this.app.GetTracer() == nil {
-		return nil
-	}
-	this.span = this.app.GetTracer().StartSpan(operationName)
-	this.session.Carrier = this.inject()
-	return this.span
-}
-func (this *sessionagent) Span() opentracing.Span {
-	return this.span
+func (this *sessionagent) CreateTrace() {
+	this.session.TraceId = utils.GenerateID().String()
+	this.session.SpanId = utils.GenerateID().String()
 }
 
-func (this *sessionagent) TracCarrier() map[string]string {
-	return this.session.Carrier
+func (this *sessionagent) TraceId() string {
+	return this.session.TraceId
 }
 
-/**
-从Session的 Span继承一个新的Span
-*/
-func (this *sessionagent) ExtractSpan(operationName string) opentracing.Span {
-	if this.app.GetTracer() == nil {
-		return nil
+func (this *sessionagent) SpanId() string {
+	return this.session.SpanId
+}
+
+func (this *sessionagent) ExtractSpan() log.TraceSpan {
+	agent := &sessionagent{
+		app: this.app,
 	}
-	if this.Span() != nil {
-		span := this.app.GetTracer().StartSpan(operationName, opentracing.ChildOf(this.Span().Context()))
-		return span
+	se := &SessionImp{
+		IP:        this.session.IP,
+		Network:   this.session.Network,
+		UserId:    this.session.UserId,
+		SessionId: this.session.SessionId,
+		ServerId:  this.session.ServerId,
+		TraceId:   this.session.TraceId,
+		SpanId:    utils.GenerateID().String(),
+		Settings:  this.session.Settings,
 	}
-	return nil
+	agent.session = se
+	return agent
 }
 
 //是否是访客(未登录) ,默认判断规则为 userId==""代表访客
@@ -440,14 +410,14 @@ func (this *sessionagent) IsGuest() bool {
 	if this.judgeGuest != nil {
 		return this.judgeGuest(this)
 	}
-	if this.GetUserid() == "" {
+	if this.GetUserId() == "" {
 		return true
 	} else {
 		return false
 	}
 }
 
-//设置自动的访客判断函数,记得一定要在全局的时候设置这个值,以免部分模块因为未设置这个判断函数造成错误的判断
+//设置自动的访客判断函数,记得一定要在gate模块设置这个值,以免部分模块因为未设置这个判断函数造成错误的判断
 func (this *sessionagent) JudgeGuest(judgeGuest func(session gate.Session) bool) {
 	this.judgeGuest = judgeGuest
 }

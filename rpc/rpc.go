@@ -15,7 +15,6 @@ package mqrpc
 
 import (
 	"github.com/liangdas/mqant/conf"
-	"github.com/liangdas/mqant/gate"
 	"github.com/liangdas/mqant/rpc/pb"
 )
 
@@ -40,7 +39,8 @@ type RPCListener interface {
 	@session  可能为nil
 	return error  当error不为nil时将直接返回改错误信息而不会再执行后续调用
 	*/
-	BeforeHandle(fn string, session gate.Session, callInfo *CallInfo) error
+	NoFoundFunction(fn string) (*FunctionInfo, error)
+	BeforeHandle(fn string, callInfo *CallInfo) error
 	OnTimeOut(fn string, Expired int64)
 	OnError(fn string, callInfo *CallInfo, err error)
 	/**
@@ -51,10 +51,18 @@ type RPCListener interface {
 	*/
 	OnComplete(fn string, callInfo *CallInfo, result *rpcpb.ResultInfo, exec_time int64)
 }
+
+type GoroutineControl interface {
+	Wait() error
+	Finish()
+}
+
 type RPCServer interface {
 	NewRabbitmqRPCServer(info *conf.Rabbitmq) (err error)
 	NewRedisRPCServer(info *conf.Redis) (err error)
+	NewUdpRPCServer(info *conf.UDP) (err error)
 	SetListener(listener RPCListener)
+	SetGoroutineControl(control GoroutineControl)
 	GetExecuting() int64
 	GetLocalServer() LocalServer
 	Register(id string, f interface{})
@@ -65,6 +73,7 @@ type RPCServer interface {
 type RPCClient interface {
 	NewRabbitmqClient(info *conf.Rabbitmq) (err error)
 	NewRedisClient(info *conf.Redis) (err error)
+	NewUdpClient(info *conf.UDP) (err error)
 	NewLocalClient(server RPCServer) (err error)
 	Done() (err error)
 	CallArgs(_func string, ArgsType []string, args [][]byte) (interface{}, string)

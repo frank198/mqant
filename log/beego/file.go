@@ -66,7 +66,7 @@ type fileLogWriter struct {
 func newFileWriter() Logger {
 	w := &fileLogWriter{
 		Daily:      true,
-		MaxDays:    7,
+		MaxDays:    365,
 		Rotate:     true,
 		RotatePerm: "0440",
 		Level:      LevelTrace,
@@ -80,7 +80,7 @@ func newFileWriter() Logger {
 func NewFileWriter() Logger {
 	w := &fileLogWriter{
 		Daily:      true,
-		MaxDays:    7,
+		MaxDays:    365,
 		Rotate:     true,
 		RotatePerm: "0440",
 		Level:      LevelTrace,
@@ -145,6 +145,39 @@ func (w *fileLogWriter) WriteMsg(when time.Time, msg string, level int) error {
 	}
 	h, d := formatTimeHeader(when)
 	msg = string(h) + msg + "\n"
+	if w.Rotate {
+		w.RLock()
+		if w.needRotate(len(msg), d) {
+			w.RUnlock()
+			w.Lock()
+			if w.needRotate(len(msg), d) {
+				if err := w.doRotate(when); err != nil {
+					fmt.Fprintf(os.Stderr, "FileLogWriter(%q): %s\n", w.Filename, err)
+				}
+			}
+			w.Unlock()
+		} else {
+			w.RUnlock()
+		}
+	}
+
+	w.Lock()
+	_, err := w.fileWriter.Write([]byte(msg))
+	if err == nil {
+		w.maxLinesCurLines++
+		w.maxSizeCurSize += len(msg)
+	}
+	w.Unlock()
+	return err
+}
+
+// WriteMsg write logger message into file.
+func (w *fileLogWriter) WriteOriginalMsg(when time.Time, msg string, level int) error {
+	if (level > w.Level) || (level < w.MinLevel) {
+		return nil
+	}
+	_, d := formatTimeHeader(when)
+	msg = msg + "\n"
 	if w.Rotate {
 		w.RLock()
 		if w.needRotate(len(msg), d) {
@@ -324,12 +357,12 @@ func (w *fileLogWriter) deleteOldLog() {
 			return
 		}
 
-		if !info.IsDir() && info.ModTime().Add(24*time.Hour*time.Duration(w.MaxDays)).Before(time.Now()) {
-			if strings.HasPrefix(filepath.Base(path), filepath.Base(w.fileNameOnly)) &&
-				strings.HasSuffix(filepath.Base(path), w.suffix) {
-				os.Remove(path)
-			}
-		}
+		//if !info.IsDir() && info.ModTime().Add(24*time.Hour*time.Duration(w.MaxDays)).Before(time.Now()) {
+		//	if strings.HasPrefix(filepath.Base(path), filepath.Base(w.fileNameOnly)) &&
+		//		strings.HasSuffix(filepath.Base(path), w.suffix) {
+		//		os.Remove(path)
+		//	}
+		//}
 		return
 	})
 }

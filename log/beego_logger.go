@@ -23,55 +23,48 @@ func NewBeegoLogger(debug bool, ProcessID string, Logdir string, settings map[st
 	log := logs.NewLogger()
 	log.ProcessID = ProcessID
 	log.EnableFuncCallDepth(true)
-	log.Async()
+	log.Async(1024)	//同步打印,可能影响性能
 	log.SetLogFuncCallDepth(4)
 	if debug {
 		//控制台
 		log.SetLogger(logs.AdapterConsole)
 	}
-	logs.Register("error_file", logs.NewFileWriter)
-	logs.Register("access_file", logs.NewFileWriter)
+	if contenttype, ok := settings["contenttype"]; ok {
+		log.SetContentType(contenttype.(string))
+	}
 	if f, ok := settings["file"]; ok {
-		file := f.(map[string]interface{})
-		//添加异常级别的日志
-		file["filename"] = fmt.Sprintf("%s/%s.error.log", Logdir, ProcessID)
-		file["level"] = logs.LevelError
-		file["maxlevel"] = logs.LevelEmergency
-		config, err := json.Marshal(file)
+		ff := f.(map[string]interface{})
+		Prefix := ""
+		if prefix, ok := ff["prefix"]; ok {
+			Prefix = prefix.(string)
+		}
+		Suffix := ".log"
+		if suffix, ok := ff["suffix"]; ok {
+			Suffix = suffix.(string)
+		}
+		ff["filename"] = fmt.Sprintf("%s/%v%s%s", Logdir, Prefix, ProcessID, Suffix)
+		config, err := json.Marshal(ff)
 		if err != nil {
 			logs.Error(err)
 		}
-		log.SetLogger("error_file", string(config))
-
-		file["filename"] = fmt.Sprintf("%s/%s.access.log", Logdir, ProcessID)
-		file["level"] = logs.LevelTrace
-		file["maxlevel"] = logs.LevelWarn
-		config, err = json.Marshal(file)
+		log.SetLogger(logs.AdapterFile, string(config))
+	}
+	if f, ok := settings["multifile"]; ok {
+		multifile := f.(map[string]interface{})
+		Prefix := ""
+		if prefix, ok := multifile["prefix"]; ok {
+			Prefix = prefix.(string)
+		}
+		Suffix := ".log"
+		if suffix, ok := multifile["suffix"]; ok {
+			Suffix = suffix.(string)
+		}
+		multifile["filename"] = fmt.Sprintf("%s/%v%s%s", Logdir, Prefix, ProcessID, Suffix)
+		config, err := json.Marshal(multifile)
 		if err != nil {
 			logs.Error(err)
 		}
-		log.SetLogger("access_file", string(config))
-	} else {
-		file := map[string]interface{}{}
-
-		//添加异常级别的日志
-		file["filename"] = fmt.Sprintf("%s/%s.error.log", Logdir, ProcessID)
-		file["level"] = logs.LevelWarn
-		file["minlevel"] = logs.LevelEmergency
-		config, err := json.Marshal(file)
-		if err != nil {
-			logs.Error(err)
-		}
-		log.SetLogger("error_file", string(config))
-
-		file["filename"] = fmt.Sprintf("%s/%s.access.log", Logdir, ProcessID)
-		file["level"] = logs.LevelTrace
-		file["minlevel"] = logs.LevelNotice
-		config, err = json.Marshal(file)
-		if err != nil {
-			logs.Error(err)
-		}
-		log.SetLogger("access_file", string(config))
+		log.SetLogger(logs.AdapterMultiFile, string(config))
 	}
 	if dingtalk, ok := settings["dingtalk"]; ok {
 		config, err := json.Marshal(dingtalk)
